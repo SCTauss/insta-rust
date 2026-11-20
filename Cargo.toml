@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/insta-rust"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+module_name_repetitions = "warn"

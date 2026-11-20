@@ -1,0 +1,17 @@
+[package]
+name = "insta-rust"
+description = "Bare-metal real-time Rust runtime on Windows Hypervisor Platform."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Hypervisor",
+    "Win32_System_Memory",
+] }
+
+[lints]
+workspace = true
