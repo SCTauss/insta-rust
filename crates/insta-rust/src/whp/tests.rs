@@ -1,3 +1,5 @@
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
 use super::Vm;
 use crate::backend::{GuestAddr, HypervisorBackend, PAGE_SIZE, Regs, SpecialRegs, VmExit};
 use crate::error::Error;
@@ -17,6 +19,14 @@ const SUM_PROGRAM: [u8; 12] = [
     0xF4, // hlt
 ];
 const SUM_RESULT: u32 = 5050;
+
+/// Windows `vid.sys` permits only one mapped WHP partition per host process at a time,
+/// so parallel tests in this binary must serialize live `Vm` lifetimes.
+static VM_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_vm() -> MutexGuard<'static, ()> {
+    VM_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn boot(program: &[u8]) -> Vm {
     let mut vm = Vm::create(RAM_BYTES).expect("create WHP VM");
@@ -43,6 +53,7 @@ fn reports_whp_available() {
 
 #[test]
 fn runs_raw_code_on_vcpu() {
+    let _guard = lock_vm();
     let mut vm = boot(&SUM_PROGRAM);
 
     let exit = vm.run().expect("run to out");
@@ -67,6 +78,7 @@ fn runs_raw_code_on_vcpu() {
 
 #[test]
 fn rejects_out_of_range_write() {
+    let _guard = lock_vm();
     let mut vm = Vm::create(RAM_BYTES).expect("create WHP VM");
     let addr = (RAM_BYTES - 1) as u64;
     assert_eq!(
@@ -84,17 +96,18 @@ fn rejects_unaligned_ram_size() {
 }
 
 #[test]
-fn creates_vms_concurrently() {
-    let workers: Vec<_> = (0..8)
-        .map(|_| {
-            std::thread::spawn(|| {
-                for _ in 0..16 {
-                    Vm::create(RAM_BYTES).expect("concurrent WHP VM creation");
-                }
-            })
-        })
-        .collect();
-    for worker in workers {
-        worker.join().expect("worker panicked");
+fn reuses_process_slot_across_sequential_vms() {
+    let _guard = lock_vm();
+    for _ in 0..16 {
+        let mut vm = boot(&SUM_PROGRAM);
+        assert_eq!(
+            vm.run().expect("run to out"),
+            VmExit::IoOut {
+                port: RESULT_PORT,
+                size_bytes: 2,
+                value: SUM_RESULT,
+            }
+        );
+        assert_eq!(vm.run().expect("run to hlt"), VmExit::Halt);
     }
 }

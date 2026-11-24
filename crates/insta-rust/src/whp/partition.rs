@@ -1,7 +1,5 @@
 //! WHP partition lifecycle and guest physical memory mapping.
 
-use std::sync::{Mutex, PoisonError};
-
 use windows::Win32::System::Hypervisor::{
     WHV_CAPABILITY, WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY,
     WHvCapabilityCodeHypervisorPresent, WHvCreatePartition, WHvDeletePartition, WHvGetCapability,
@@ -13,8 +11,6 @@ use super::failed;
 use super::memory::Memory;
 use crate::backend::GuestAddr;
 use crate::error::Result;
-
-static SETUP_LOCK: Mutex<()> = Mutex::new(());
 
 /// Returns whether WHP reports a usable hypervisor on this host.
 pub fn is_hypervisor_present() -> bool {
@@ -57,10 +53,6 @@ impl Partition {
         }
         .map_err(failed("WHvSetPartitionProperty"))?;
 
-        // VID assigns its internal partition identity during setup; concurrent setups in one
-        // process can collide, surfacing later as STATUS_VID_PARTITION_ALREADY_EXISTS
-        // (0xC0370008) from WHvMapGpaRange. Serializing setup alone removes the race.
-        let _setup = SETUP_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: `handle` is valid and all mandatory properties are configured.
         unsafe { WHvSetupPartition(handle) }.map_err(failed("WHvSetupPartition"))?;
         Ok(partition)
@@ -72,6 +64,10 @@ impl Partition {
     }
 
     /// Maps all of `memory` read/write/execute at guest physical `base`.
+    ///
+    /// Windows `vid.sys` allows only one partition per host process to hold active
+    /// `WHvMapGpaRange` mappings at a time; a second simultaneous mapping fails with
+    /// `STATUS_VID_PARTITION_ALREADY_EXISTS` (`0xC0370008`).
     ///
     /// # Safety
     /// `memory` must stay allocated until this partition is dropped.
