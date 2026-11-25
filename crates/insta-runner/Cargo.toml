@@ -1,0 +1,13 @@
+[package]
+name = "insta-runner"
+description = "Thin native Cargo runner hook for insta-rust bare-metal WHP guests."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+insta-rust = { path = "../insta-rust" }
+
+[lints]
+workspace = true

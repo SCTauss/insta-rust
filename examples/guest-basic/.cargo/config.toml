@@ -1,0 +1,16 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+runner = [
+    "cargo",
+    "run",
+    "--quiet",
+    "--manifest-path",
+    "../../Cargo.toml",
+    "--package",
+    "insta-runner",
+    "--target",
+    "x86_64-pc-windows-msvc",
+    "--",
+]

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/insta-rust"]
+members = ["crates/insta-rust", "crates/insta-runner"]
+exclude = ["examples/guest-basic"]
 
 [workspace.package]
 edition = "2024"

@@ -1,6 +1,7 @@
 //! Windows Hypervisor Platform backend; the only module permitted to use `unsafe`.
 
 mod memory;
+pub(crate) mod paging;
 mod partition;
 #[cfg(test)]
 mod tests;
@@ -48,6 +49,10 @@ impl HypervisorBackend for Vm {
 
     fn write(&mut self, addr: GuestAddr, bytes: &[u8]) -> Result<()> {
         self.memory.write(addr, bytes)
+    }
+
+    fn zero(&mut self, addr: GuestAddr, len: usize) -> Result<()> {
+        self.memory.zero(addr, len)
     }
 
     fn set_regs(&mut self, regs: &Regs) -> Result<()> {

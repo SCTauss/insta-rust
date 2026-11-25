@@ -41,17 +41,26 @@ impl Memory {
 
     /// Copies `bytes` into RAM at guest physical `addr` (RAM is mapped at GPA 0).
     pub fn write(&mut self, addr: GuestAddr, bytes: &[u8]) -> Result<()> {
-        let range = Error::OutOfRange {
-            addr: addr.0,
-            len: bytes.len(),
-        };
-        let start = usize::try_from(addr.0).map_err(|_| range.clone())?;
-        let end = start.checked_add(bytes.len()).ok_or(range.clone())?;
-        if end > self.size_bytes {
-            return Err(range);
-        }
-        self.as_mut_slice()[start..end].copy_from_slice(bytes);
+        let range = self.checked_range(addr, bytes.len())?;
+        self.as_mut_slice()[range].copy_from_slice(bytes);
         Ok(())
+    }
+
+    /// Zeroes `len` bytes of RAM starting at guest physical `addr`.
+    pub fn zero(&mut self, addr: GuestAddr, len: usize) -> Result<()> {
+        let range = self.checked_range(addr, len)?;
+        self.as_mut_slice()[range].fill(0);
+        Ok(())
+    }
+
+    fn checked_range(&self, addr: GuestAddr, len: usize) -> Result<core::ops::Range<usize>> {
+        let err = Error::OutOfRange { addr: addr.0, len };
+        let start = usize::try_from(addr.0).map_err(|_| err.clone())?;
+        let end = start.checked_add(len).ok_or(err.clone())?;
+        if end > self.size_bytes {
+            return Err(err);
+        }
+        Ok(start..end)
     }
 
     fn as_mut_slice(&mut self) -> &mut [u8] {

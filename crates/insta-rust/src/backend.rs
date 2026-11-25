@@ -9,6 +9,7 @@ pub const PAGE_SIZE: usize = 4096;
 const RFLAGS_FIXED: u64 = 1 << 1;
 
 /// CR0.ET is hardwired to 1 on every x86-64 CPU.
+#[cfg(test)]
 const CR0_ET: u64 = 1 << 4;
 
 /// Guest physical address.
@@ -89,6 +90,7 @@ impl Segment {
     pub const DATA: u8 = 0x3;
 
     /// Real-mode segment: base is `selector << 4` with a 64 KiB limit.
+    #[cfg(test)]
     pub fn real(selector: u16, kind: u8) -> Self {
         Self {
             base: u64::from(selector) << 4,
@@ -101,6 +103,38 @@ impl Segment {
             long: false,
             big: false,
             granular: false,
+        }
+    }
+
+    /// 64-bit long-mode code segment (`L = 1`, `D = 0`).
+    pub fn code64(selector: u16) -> Self {
+        Self {
+            base: 0,
+            limit: u32::MAX,
+            selector,
+            kind: Self::CODE,
+            code_data: true,
+            dpl: 0,
+            present: true,
+            long: true,
+            big: false,
+            granular: true,
+        }
+    }
+
+    /// Flat 64-bit data/stack segment.
+    pub fn data64(selector: u16) -> Self {
+        Self {
+            base: 0,
+            limit: u32::MAX,
+            selector,
+            kind: Self::DATA,
+            code_data: true,
+            dpl: 0,
+            present: true,
+            long: false,
+            big: true,
+            granular: true,
         }
     }
 }
@@ -120,6 +154,7 @@ pub struct SpecialRegs {
     pub efer: u64,
 }
 
+#[cfg(test)]
 impl SpecialRegs {
     /// 16-bit real mode with every segment at selector 0, paging and protection off.
     pub fn real_mode() -> Self {
@@ -165,10 +200,14 @@ pub trait HypervisorBackend: Sized {
     /// Copies `bytes` into guest RAM starting at `addr`.
     fn write(&mut self, addr: GuestAddr, bytes: &[u8]) -> Result<()>;
 
+    /// Zeroes `len` bytes of guest RAM starting at `addr`.
+    fn zero(&mut self, addr: GuestAddr, len: usize) -> Result<()>;
+
     /// Loads the general-purpose register file.
     fn set_regs(&mut self, regs: &Regs) -> Result<()>;
 
     /// Reads the general-purpose register file.
+    #[allow(dead_code)] // Used by M1 hardware tests and M3 fault register snapshots.
     fn regs(&self) -> Result<Regs>;
 
     /// Loads segment caches, control registers, and EFER.

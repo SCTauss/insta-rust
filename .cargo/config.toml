@@ -1,0 +1,2 @@
+[target.x86_64-unknown-none]
+runner = ["cargo", "run", "--quiet", "--package", "insta-runner", "--"]

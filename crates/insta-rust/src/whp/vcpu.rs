@@ -103,6 +103,7 @@ impl Vcpu {
         self.set(&GPR_NAMES, &values)
     }
 
+    #[allow(dead_code)] // Used by M1 hardware tests and M3 fault register snapshots.
     pub fn regs(&self) -> Result<Regs> {
         let mut values = [WHV_REGISTER_VALUE::default(); GPR_NAMES.len()];
         // SAFETY: both arrays have exactly `GPR_NAMES.len()` elements and `values` is writable.
