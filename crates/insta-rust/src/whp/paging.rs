@@ -8,6 +8,9 @@ pub const PML4_ADDR: GuestAddr = GuestAddr(0x1000);
 const PDPT_ADDR: GuestAddr = GuestAddr(0x2000);
 const PD_ADDR: GuestAddr = GuestAddr(0x3000);
 
+/// Exclusive end of low reserved guest memory (null page + identity page tables).
+pub const RESERVED_LOW_END: u64 = 0x4000;
+
 /// Initial 16-byte-aligned stack top, right below the 2 MiB guest ELF load base.
 pub const INITIAL_STACK_TOP: u64 = 0x001F_FFF0;
 
@@ -40,14 +43,21 @@ const EFER_LMA: u64 = 1 << 10;
 const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
 
-/// Writes identity-mapped 4-level page tables into guest RAM and returns matching long-mode regs.
-pub fn install(vm: &mut impl HypervisorBackend, ram_bytes: usize) -> Result<SpecialRegs> {
-    if !(MIN_RAM_BYTES..=MAX_RAM_BYTES).contains(&ram_bytes) || !ram_bytes.is_multiple_of(PAGE_SIZE)
+/// Validates that `ram_bytes` is a 2 MiB multiple within the supported identity-map window.
+pub fn validate_ram_bytes(ram_bytes: usize) -> Result<()> {
+    if !(MIN_RAM_BYTES..=MAX_RAM_BYTES).contains(&ram_bytes)
+        || !ram_bytes.is_multiple_of(HUGE_PAGE_BYTES)
     {
         return Err(Error::BadSize {
             size_bytes: ram_bytes,
         });
     }
+    Ok(())
+}
+
+/// Writes identity-mapped 4-level page tables into guest RAM and returns matching long-mode regs.
+pub fn install(vm: &mut impl HypervisorBackend, ram_bytes: usize) -> Result<SpecialRegs> {
+    validate_ram_bytes(ram_bytes)?;
 
     let pml4_entry = (PDPT_ADDR.0 | PTE_PRESENT | PTE_WRITABLE).to_le_bytes();
     vm.write(PML4_ADDR, &pml4_entry)?;
@@ -55,7 +65,7 @@ pub fn install(vm: &mut impl HypervisorBackend, ram_bytes: usize) -> Result<Spec
     let pdpt_entry = (PD_ADDR.0 | PTE_PRESENT | PTE_WRITABLE).to_le_bytes();
     vm.write(PDPT_ADDR, &pdpt_entry)?;
 
-    let huge_pages = ram_bytes.div_ceil(HUGE_PAGE_BYTES);
+    let huge_pages = ram_bytes / HUGE_PAGE_BYTES;
     let mut pd = [0u8; PAGE_SIZE];
     for i in 0..huge_pages {
         let entry = ((i * HUGE_PAGE_BYTES) as u64) | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;

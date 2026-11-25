@@ -15,14 +15,13 @@ impl Channel {
         Self::default()
     }
 
-    /// Consumes a guest `out` exit if the port is recognized; returns `false` otherwise.
-    pub fn write_port(&mut self, port: u16, size_bytes: u8, value: u32) -> bool {
+    /// Records a guest `out` exit when targeting [`STDOUT_PORT`]; ignores other ports.
+    pub fn write_port(&mut self, port: u16, size_bytes: u8, value: u32) {
         if port != STDOUT_PORT {
-            return false;
+            return;
         }
         let len = usize::from(size_bytes).min(size_of::<u32>());
         self.stdout.extend_from_slice(&value.to_le_bytes()[..len]);
-        true
     }
 
     /// Returns all bytes captured from the guest stdout port.

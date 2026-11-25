@@ -60,6 +60,24 @@ const IO_STRING_OP: u32 = 1 << 4;
 /// Low nibble of `WHV_VP_EXIT_CONTEXT::_bitfield` is the exiting instruction length.
 const INSTRUCTION_LEN_MASK: u8 = 0x0F;
 
+/// Enforces `DECLSPEC_ALIGN(16)` from `WinHvPlatformDefs.h`, which `windows` 0.62 omits
+/// from `WHV_UINT128` / `WHV_REGISTER_VALUE` / `WHV_RUN_VP_EXIT_CONTEXT`.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+struct Aligned16<T>(T);
+
+const _: () = {
+    assert!(size_of::<Aligned16<WHV_REGISTER_VALUE>>() == 16);
+    assert!(align_of::<Aligned16<WHV_REGISTER_VALUE>>() == 16);
+    assert!(size_of::<WHV_RUN_VP_EXIT_CONTEXT>() == 224);
+};
+
+fn reg64(value: u64) -> Aligned16<WHV_REGISTER_VALUE> {
+    let mut reg = WHV_REGISTER_VALUE::default();
+    reg.Reg64 = value;
+    Aligned16(reg)
+}
+
 /// One virtual processor inside a WHP partition.
 pub struct Vcpu {
     partition: WHV_PARTITION_HANDLE,
@@ -99,21 +117,22 @@ impl Vcpu {
             regs.rip,
             regs.rflags,
         ]
-        .map(|v| WHV_REGISTER_VALUE { Reg64: v });
+        .map(reg64);
         self.set(&GPR_NAMES, &values)
     }
 
     #[allow(dead_code)] // Used by M1 hardware tests and M3 fault register snapshots.
     pub fn regs(&self) -> Result<Regs> {
-        let mut values = [WHV_REGISTER_VALUE::default(); GPR_NAMES.len()];
-        // SAFETY: both arrays have exactly `GPR_NAMES.len()` elements and `values` is writable.
+        let mut values = [Aligned16(WHV_REGISTER_VALUE::default()); GPR_NAMES.len()];
+        // SAFETY: `Aligned16<WHV_REGISTER_VALUE>` has the exact size (16) and C alignment (16)
+        // of `WHV_REGISTER_VALUE`; both arrays have `GPR_NAMES.len()` elements and `values` is writable.
         unsafe {
             WHvGetVirtualProcessorRegisters(
                 self.partition,
                 self.index,
                 GPR_NAMES.as_ptr(),
                 GPR_NAMES.len() as u32,
-                values.as_mut_ptr(),
+                values.as_mut_ptr().cast(),
             )
         }
         .map_err(failed("WHvGetVirtualProcessorRegisters"))?;
@@ -137,7 +156,7 @@ impl Vcpu {
             r15,
             rip,
             rflags,
-        ] = values.map(|v| unsafe { v.Reg64 });
+        ] = values.map(|v| unsafe { v.0.Reg64 });
         Ok(Regs {
             rax,
             rbx,
@@ -161,8 +180,7 @@ impl Vcpu {
     }
 
     pub fn set_special_regs(&self, sregs: &SpecialRegs) -> Result<()> {
-        let seg = |s: &Segment| WHV_REGISTER_VALUE { Segment: to_whp(s) };
-        let reg = |v: u64| WHV_REGISTER_VALUE { Reg64: v };
+        let seg = |s: &Segment| Aligned16(WHV_REGISTER_VALUE { Segment: to_whp(s) });
         let values = [
             seg(&sregs.cs),
             seg(&sregs.ds),
@@ -170,32 +188,32 @@ impl Vcpu {
             seg(&sregs.fs),
             seg(&sregs.gs),
             seg(&sregs.ss),
-            reg(sregs.cr0),
-            reg(sregs.cr3),
-            reg(sregs.cr4),
-            reg(sregs.efer),
+            reg64(sregs.cr0),
+            reg64(sregs.cr3),
+            reg64(sregs.cr4),
+            reg64(sregs.efer),
         ];
         self.set(&SPECIAL_NAMES, &values)
     }
 
     /// Blocks while the guest runs on the physical CPU, then decodes the exit.
     pub fn run(&self) -> Result<VmExit> {
-        let mut exit = WHV_RUN_VP_EXIT_CONTEXT::default();
-        // SAFETY: `exit` is a writable `WHV_RUN_VP_EXIT_CONTEXT` of the size passed, and the
-        // partition outlives `self` per `new`'s contract.
+        let mut exit = Aligned16(WHV_RUN_VP_EXIT_CONTEXT::default());
+        // SAFETY: `exit` is a writable, 16-byte-aligned `WHV_RUN_VP_EXIT_CONTEXT` of the size
+        // passed, and the partition outlives `self` per `new`'s contract.
         unsafe {
             WHvRunVirtualProcessor(
                 self.partition,
                 self.index,
-                (&raw mut exit).cast(),
+                (&raw mut exit.0).cast(),
                 size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
             )
         }
         .map_err(failed("WHvRunVirtualProcessor"))?;
 
-        match exit.ExitReason {
+        match exit.0.ExitReason {
             reason if reason == WHvRunVpExitReasonX64Halt => Ok(VmExit::Halt),
-            reason if reason == WHvRunVpExitReasonX64IoPortAccess => self.decode_io(&exit),
+            reason if reason == WHvRunVpExitReasonX64IoPortAccess => self.decode_io(&exit.0),
             reason => Ok(VmExit::Unhandled { code: reason.0 }),
         }
     }
@@ -219,9 +237,7 @@ impl Vcpu {
 
         // WHP leaves RIP on the `out`; the host must retire it before re-entering.
         let len = u64::from(exit.VpContext._bitfield & INSTRUCTION_LEN_MASK);
-        let next = WHV_REGISTER_VALUE {
-            Reg64: exit.VpContext.Rip + len,
-        };
+        let next = reg64(exit.VpContext.Rip.wrapping_add(len));
         self.set(&[WHvX64RegisterRip], &[next])?;
 
         Ok(VmExit::IoOut {
@@ -231,17 +247,22 @@ impl Vcpu {
         })
     }
 
-    fn set(&self, names: &[WHV_REGISTER_NAME], values: &[WHV_REGISTER_VALUE]) -> Result<()> {
+    fn set(
+        &self,
+        names: &[WHV_REGISTER_NAME],
+        values: &[Aligned16<WHV_REGISTER_VALUE>],
+    ) -> Result<()> {
         debug_assert_eq!(names.len(), values.len());
-        // SAFETY: `names` and `values` are equal-length live slices, and the partition
-        // outlives `self` per `new`'s contract.
+        // SAFETY: `Aligned16<WHV_REGISTER_VALUE>` has the exact size (16) and C alignment (16)
+        // of `WHV_REGISTER_VALUE`; `names` and `values` are equal-length live slices, and the
+        // partition outlives `self` per `new`'s contract.
         unsafe {
             WHvSetVirtualProcessorRegisters(
                 self.partition,
                 self.index,
                 names.as_ptr(),
                 names.len() as u32,
-                values.as_ptr(),
+                values.as_ptr().cast(),
             )
         }
         .map_err(failed("WHvSetVirtualProcessorRegisters"))

@@ -28,7 +28,7 @@ type ActiveVm = whp::Vm;
 /// Configuration for booting a bare-metal guest [`Instance`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
-    /// Total guest physical RAM in bytes (must be a page multiple between 4 MiB and 1 GiB).
+    /// Total guest physical RAM in bytes (must be a 2 MiB multiple between 4 MiB and 1 GiB).
     pub ram_bytes: usize,
 }
 
@@ -78,6 +78,9 @@ pub struct Instance {
 impl Instance {
     /// Allocates guest RAM, installs 64-bit long-mode page tables, and loads `elf`.
     pub fn boot(elf: &ElfImage, config: Config) -> Result<Self> {
+        whp::paging::validate_ram_bytes(config.ram_bytes)?;
+        elf.validate_for_ram(config.ram_bytes, whp::paging::RESERVED_LOW_END)?;
+
         let mut vm = ActiveVm::create(config.ram_bytes)?;
         let sregs = whp::paging::install(&mut vm, config.ram_bytes)?;
         elf.load_into(&mut vm)?;

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use object::LittleEndian;
-use object::elf::{EM_X86_64, PT_LOAD};
+use object::elf::{EM_X86_64, ET_EXEC, PT_LOAD};
 use object::read::elf::{ElfFile64, FileHeader, ProgramHeader};
 
 use crate::backend::{GuestAddr, HypervisorBackend};
@@ -40,6 +40,14 @@ impl ElfImage {
         if header.e_machine(endian) != EM_X86_64 {
             return Err(Error::InvalidElf {
                 reason: format!("expected EM_X86_64, got {:#x}", header.e_machine(endian)),
+            });
+        }
+        if header.e_type(endian) != ET_EXEC {
+            return Err(Error::InvalidElf {
+                reason: format!(
+                    "expected static ET_EXEC ELF (link with -no-pie), got e_type={:#x}",
+                    header.e_type(endian)
+                ),
             });
         }
 
@@ -116,6 +124,52 @@ impl ElfImage {
     /// Guest entry point address (`e_entry`).
     pub fn entry(&self) -> u64 {
         self.entry.0
+    }
+
+    /// Verifies that all `PT_LOAD` segments and `e_entry` fit above `reserved_low_end` in RAM.
+    pub(crate) fn validate_for_ram(&self, ram_bytes: usize, reserved_low_end: u64) -> Result<()> {
+        let ram_end = ram_bytes as u64;
+        let mut entry_in_segment = false;
+
+        for seg in &self.segments {
+            if seg.mem_size == 0 {
+                continue;
+            }
+            let seg_start = seg.guest_addr.0;
+            let seg_end = seg_start
+                .checked_add(seg.mem_size as u64)
+                .ok_or(Error::OutOfRange {
+                    addr: seg_start,
+                    len: seg.mem_size,
+                })?;
+
+            if seg_start < reserved_low_end {
+                return Err(Error::InvalidElf {
+                    reason: format!(
+                        "PT_LOAD at {seg_start:#x} overlaps reserved low memory (< {reserved_low_end:#x})"
+                    ),
+                });
+            }
+            if seg_end > ram_end {
+                return Err(Error::OutOfRange {
+                    addr: seg_start,
+                    len: seg.mem_size,
+                });
+            }
+            if (seg_start..seg_end).contains(&self.entry.0) {
+                entry_in_segment = true;
+            }
+        }
+
+        if !entry_in_segment {
+            return Err(Error::InvalidElf {
+                reason: format!(
+                    "e_entry {:#x} does not fall within any PT_LOAD segment",
+                    self.entry.0
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Copies every `PT_LOAD` segment into guest RAM and zeroes trailing `.bss` bytes.
