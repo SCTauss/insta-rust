@@ -1,9 +1,10 @@
 //! WHP partition lifecycle and guest physical memory mapping.
 
 use windows::Win32::System::Hypervisor::{
-    WHV_CAPABILITY, WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY,
+    WHV_CAPABILITY, WHV_EXTENDED_VM_EXITS, WHV_PARTITION_HANDLE, WHV_PARTITION_PROPERTY,
     WHvCapabilityCodeHypervisorPresent, WHvCreatePartition, WHvDeletePartition, WHvGetCapability,
     WHvMapGpaRange, WHvMapGpaRangeFlagExecute, WHvMapGpaRangeFlagRead, WHvMapGpaRangeFlagWrite,
+    WHvPartitionPropertyCodeExceptionExitBitmap, WHvPartitionPropertyCodeExtendedVmExits,
     WHvPartitionPropertyCodeProcessorCount, WHvSetPartitionProperty, WHvSetupPartition,
 };
 
@@ -11,6 +12,13 @@ use super::failed;
 use super::memory::Memory;
 use crate::backend::GuestAddr;
 use crate::error::Result;
+
+/// Bit 2 of `WHV_EXTENDED_VM_EXITS` enables `WHvRunVpExitReasonException`.
+const EXTENDED_EXIT_EXCEPTION: u64 = 1 << 2;
+
+/// First-chance exception vectors trapped before Triple Fault:
+/// `#DE` (0), `#BP` (3), `#UD` (6), `#GP` (13), `#PF` (14).
+const TRAPPED_EXCEPTION_BITMAP: u64 = (1 << 0) | (1 << 3) | (1 << 6) | (1 << 13) | (1 << 14);
 
 /// Returns whether WHP reports a usable hypervisor on this host.
 pub fn is_hypervisor_present() -> bool {
@@ -52,6 +60,36 @@ impl Partition {
             )
         }
         .map_err(failed("WHvSetPartitionProperty"))?;
+
+        let extended = WHV_PARTITION_PROPERTY {
+            ExtendedVmExits: WHV_EXTENDED_VM_EXITS {
+                AsUINT64: EXTENDED_EXIT_EXCEPTION,
+            },
+        };
+        // SAFETY: `handle` is not yet set up; `extended` covers the 8-byte `ExtendedVmExits` bitmask.
+        unsafe {
+            WHvSetPartitionProperty(
+                handle,
+                WHvPartitionPropertyCodeExtendedVmExits,
+                (&raw const extended).cast(),
+                size_of::<WHV_EXTENDED_VM_EXITS>() as u32,
+            )
+        }
+        .map_err(failed("WHvSetPartitionProperty(ExtendedVmExits)"))?;
+
+        let bitmap = WHV_PARTITION_PROPERTY {
+            ExceptionExitBitmap: TRAPPED_EXCEPTION_BITMAP,
+        };
+        // SAFETY: `handle` is not yet set up; `bitmap` covers the 8-byte `ExceptionExitBitmap`.
+        unsafe {
+            WHvSetPartitionProperty(
+                handle,
+                WHvPartitionPropertyCodeExceptionExitBitmap,
+                (&raw const bitmap).cast(),
+                size_of::<u64>() as u32,
+            )
+        }
+        .map_err(failed("WHvSetPartitionProperty(ExceptionExitBitmap)"))?;
 
         // SAFETY: `handle` is valid and all mandatory properties are configured.
         unsafe { WHvSetupPartition(handle) }.map_err(failed("WHvSetupPartition"))?;

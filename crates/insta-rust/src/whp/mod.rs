@@ -7,7 +7,9 @@ mod partition;
 mod tests;
 mod vcpu;
 
-use crate::backend::{GuestAddr, HypervisorBackend, Regs, SpecialRegs, VmExit};
+use std::sync::Arc;
+
+use crate::backend::{CancelHandle, GuestAddr, HypervisorBackend, Regs, SpecialRegs, VmExit};
 use crate::error::{Error, Result};
 use memory::Memory;
 use partition::Partition;
@@ -65,6 +67,18 @@ impl HypervisorBackend for Vm {
 
     fn set_special_regs(&mut self, sregs: &SpecialRegs) -> Result<()> {
         self.vcpu.set_special_regs(sregs)
+    }
+
+    fn complete_io_in(&mut self, size_bytes: u8, value: u32) -> Result<()> {
+        self.vcpu.complete_io_in(size_bytes, value)
+    }
+
+    fn cancel_handle(&self) -> Arc<dyn CancelHandle> {
+        self.vcpu.cancel_handle()
+    }
+
+    fn clear_cancel(&mut self) {
+        self.vcpu.clear_cancel();
     }
 
     fn run(&mut self) -> Result<VmExit> {

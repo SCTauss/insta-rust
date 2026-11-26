@@ -3,20 +3,23 @@
 
 mod backend;
 mod error;
+pub mod fault;
 mod io;
 mod loader;
+mod watchdog;
 
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)] // WHP FFI and guest RAM mapping are fenced into this module only.
 mod whp;
 
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
-use backend::{HypervisorBackend, Regs, VmExit};
+use backend::{HypervisorBackend, VmExit};
 
-pub use backend::PAGE_SIZE;
+pub use backend::{PAGE_SIZE, Regs};
 pub use error::{Error, Result};
-pub use io::STDOUT_PORT;
+pub use io::{INPUT_PORT, PANIC_PORT, STDOUT_PORT};
 pub use loader::ElfImage;
 
 /// Default guest RAM allocation (16 MiB).
@@ -30,21 +33,32 @@ type ActiveVm = whp::Vm;
 pub struct Config {
     /// Total guest physical RAM in bytes (must be a 2 MiB multiple between 4 MiB and 1 GiB).
     pub ram_bytes: usize,
+    /// Optional execution watchdog deadline; cancels the vCPU if exceeded.
+    pub timeout: Option<Duration>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             ram_bytes: DEFAULT_RAM_BYTES,
+            timeout: None,
         }
     }
 }
 
 /// Terminal outcome of a guest execution run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExitStatus {
     /// Guest halted cleanly via `hlt`.
     Halted,
+    /// Guest panicked or triggered a trapped hardware exception.
+    Faulted(fault::Report),
+    /// Guest exceeded [`Config::timeout`] and was canceled by the watchdog.
+    TimedOut {
+        elapsed: Duration,
+        regs: Regs,
+        location: Option<fault::Location>,
+    },
     /// Guest triggered a VM exit not handled by the runtime yet.
     Unhandled { code: i32 },
 }
@@ -73,6 +87,8 @@ pub fn is_available() -> bool {
 /// Loaded bare-metal guest instance ready to execute on hardware.
 pub struct Instance {
     vm: ActiveVm,
+    elf_bytes: Vec<u8>,
+    timeout: Option<Duration>,
 }
 
 impl Instance {
@@ -90,12 +106,27 @@ impl Instance {
             rsp: whp::paging::INITIAL_STACK_TOP,
             ..Regs::default()
         })?;
-        Ok(Self { vm })
+        Ok(Self {
+            vm,
+            elf_bytes: elf.bytes().to_vec(),
+            timeout: config.timeout,
+        })
     }
 
-    /// Executes the guest on the physical CPU until it halts or hits an unhandled exit.
+    /// Executes the guest on the physical CPU with an empty input stream.
     pub fn run(&mut self) -> Result<RunOutput> {
-        let mut channel = io::Channel::new();
+        self.run_with_input(&[])
+    }
+
+    /// Executes the guest on the physical CPU, feeding `input` over [`INPUT_PORT`].
+    pub fn run_with_input(&mut self, input: &[u8]) -> Result<RunOutput> {
+        self.vm.clear_cancel();
+        let start = Instant::now();
+        let _timer = self
+            .timeout
+            .map(|d| watchdog::Timer::arm(d, self.vm.cancel_handle()));
+        let mut channel = io::Channel::new(input);
+
         loop {
             match self.vm.run()? {
                 VmExit::IoOut {
@@ -105,13 +136,87 @@ impl Instance {
                 } => {
                     channel.write_port(port, size_bytes, value);
                 }
+                VmExit::IoIn { port, size_bytes } => {
+                    let value = channel.read_port(port, size_bytes);
+                    self.vm.complete_io_in(size_bytes, value)?;
+                }
                 VmExit::Halt => {
+                    drop(_timer);
+                    let exit = if let Some(message) = channel.panic_message() {
+                        let regs = self.vm.regs()?;
+                        let location = fault::symbolize(&self.elf_bytes, regs.rip);
+                        ExitStatus::Faulted(fault::Report {
+                            reason: fault::Reason::GuestPanic { message },
+                            regs,
+                            location,
+                        })
+                    } else {
+                        ExitStatus::Halted
+                    };
                     return Ok(RunOutput {
                         stdout: channel.into_stdout(),
-                        exit: ExitStatus::Halted,
+                        exit,
+                    });
+                }
+                VmExit::Exception {
+                    vector,
+                    error_code,
+                    faulting_addr,
+                } => {
+                    drop(_timer);
+                    let regs = self.vm.regs()?;
+                    let location = fault::symbolize(&self.elf_bytes, regs.rip);
+                    let reason = fault::classify_exception(vector, error_code, faulting_addr);
+                    return Ok(RunOutput {
+                        stdout: channel.into_stdout(),
+                        exit: ExitStatus::Faulted(fault::Report {
+                            reason,
+                            regs,
+                            location,
+                        }),
+                    });
+                }
+                VmExit::MemoryFault { gpa, gva } => {
+                    drop(_timer);
+                    let regs = self.vm.regs()?;
+                    let location = fault::symbolize(&self.elf_bytes, regs.rip);
+                    return Ok(RunOutput {
+                        stdout: channel.into_stdout(),
+                        exit: ExitStatus::Faulted(fault::Report {
+                            reason: fault::Reason::MemoryFault { gpa, gva },
+                            regs,
+                            location,
+                        }),
+                    });
+                }
+                VmExit::TripleFault => {
+                    drop(_timer);
+                    let regs = self.vm.regs()?;
+                    let location = fault::symbolize(&self.elf_bytes, regs.rip);
+                    return Ok(RunOutput {
+                        stdout: channel.into_stdout(),
+                        exit: ExitStatus::Faulted(fault::Report {
+                            reason: fault::Reason::TripleFault,
+                            regs,
+                            location,
+                        }),
+                    });
+                }
+                VmExit::Canceled => {
+                    drop(_timer);
+                    let regs = self.vm.regs()?;
+                    let location = fault::symbolize(&self.elf_bytes, regs.rip);
+                    return Ok(RunOutput {
+                        stdout: channel.into_stdout(),
+                        exit: ExitStatus::TimedOut {
+                            elapsed: start.elapsed(),
+                            regs,
+                            location,
+                        },
                     });
                 }
                 VmExit::Unhandled { code } => {
+                    drop(_timer);
                     return Ok(RunOutput {
                         stdout: channel.into_stdout(),
                         exit: ExitStatus::Unhandled { code },

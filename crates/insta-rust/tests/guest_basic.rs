@@ -122,7 +122,13 @@ fn rejects_non_2mib_or_undersized_ram_before_allocating() {
     let elf = ElfImage::from_bytes(synthetic_elf(2, 0x20_0000, 0x20_0000)).expect("parse ELF");
     for bad in [4096, 4 * 1024 * 1024 + 4096, 2 * 1024 * 1024 * 1024] {
         assert!(matches!(
-            Instance::boot(&elf, Config { ram_bytes: bad }),
+            Instance::boot(
+                &elf,
+                Config {
+                    ram_bytes: bad,
+                    ..Config::default()
+                }
+            ),
             Err(Error::BadSize { size_bytes }) if size_bytes == bad
         ));
     }

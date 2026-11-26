@@ -126,6 +126,11 @@ impl ElfImage {
         self.entry.0
     }
 
+    /// Raw ELF bytes retained for host-side DWARF symbolization.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// Verifies that all `PT_LOAD` segments and `e_entry` fit above `reserved_low_end` in RAM.
     pub(crate) fn validate_for_ram(&self, ram_bytes: usize, reserved_low_end: u64) -> Result<()> {
         let ram_end = ram_bytes as u64;

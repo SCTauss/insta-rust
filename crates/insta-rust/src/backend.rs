@@ -1,5 +1,7 @@
 //! Platform-neutral hypervisor contract implemented by each backend.
 
+use std::sync::Arc;
+
 use crate::error::Result;
 
 /// Guest page size; RAM sizes and mapping bases must be multiples of it.
@@ -185,8 +187,28 @@ pub enum VmExit {
         size_bytes: u8,
         value: u32,
     },
+    /// Guest read `size_bytes` from I/O `port`; call `complete_io_in` before re-entering.
+    IoIn { port: u16, size_bytes: u8 },
+    /// First-chance CPU exception trapped before guest IDT/Triple Fault escalation.
+    Exception {
+        vector: u8,
+        error_code: Option<u32>,
+        faulting_addr: Option<u64>,
+    },
+    /// Guest accessed an unmapped or disallowed guest physical address.
+    MemoryFault { gpa: u64, gva: u64 },
+    /// Unrecoverable exception (Triple Fault).
+    TripleFault,
+    /// Execution was canceled asynchronously (e.g., by watchdog).
+    Canceled,
     /// Exit the backend does not translate yet; carries the raw platform reason code.
     Unhandled { code: i32 },
+}
+
+/// Thread-safe handle used to asynchronously cancel a blocking [`HypervisorBackend::run`].
+pub trait CancelHandle: Send + Sync {
+    /// Requests cancellation of the vCPU's current (or next) run.
+    fn cancel(&self);
 }
 
 /// Single-vCPU hardware virtual machine provided by a hypervisor backend.
@@ -207,11 +229,19 @@ pub trait HypervisorBackend: Sized {
     fn set_regs(&mut self, regs: &Regs) -> Result<()>;
 
     /// Reads the general-purpose register file.
-    #[allow(dead_code)] // Used by M1 hardware tests and M3 fault register snapshots.
     fn regs(&self) -> Result<Regs>;
 
     /// Loads segment caches, control registers, and EFER.
     fn set_special_regs(&mut self, sregs: &SpecialRegs) -> Result<()>;
+
+    /// Completes a pending [`VmExit::IoIn`] by writing `value` to `RAX` and retiring `RIP`.
+    fn complete_io_in(&mut self, size_bytes: u8, value: u32) -> Result<()>;
+
+    /// Returns a thread-safe handle that can cancel a running vCPU.
+    fn cancel_handle(&self) -> Arc<dyn CancelHandle>;
+
+    /// Clears any latched cancel request before starting a new run loop.
+    fn clear_cancel(&mut self);
 
     /// Runs the vCPU on the physical CPU until the next VM exit.
     fn run(&mut self) -> Result<VmExit>;
