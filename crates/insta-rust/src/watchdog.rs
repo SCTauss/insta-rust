@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::backend::CancelHandle;
 
@@ -23,14 +23,21 @@ impl Timer {
         let worker_fired = Arc::clone(&fired);
 
         let worker = thread::spawn(move || {
+            let deadline = Instant::now() + timeout;
             let (lock, cvar) = &*worker_state;
             let mut done = lock.lock().unwrap_or_else(PoisonError::into_inner);
             while !*done {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    worker_fired.store(true, Ordering::Release);
+                    handle.cancel();
+                    break;
+                }
                 let (next, res) = cvar
-                    .wait_timeout(done, timeout)
+                    .wait_timeout(done, remaining)
                     .unwrap_or_else(PoisonError::into_inner);
                 done = next;
-                if !*done && res.timed_out() {
+                if !*done && (res.timed_out() || Instant::now() >= deadline) {
                     worker_fired.store(true, Ordering::Release);
                     handle.cancel();
                     break;

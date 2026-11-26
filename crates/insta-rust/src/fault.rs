@@ -79,7 +79,7 @@ impl fmt::Display for Location {
             write!(f, " at {file}")?;
             if let Some(line) = self.line {
                 write!(f, ":{line}")?;
-                if let Some(col) = self.column {
+                if let Some(col) = self.column.filter(|&c| c > 0) {
                     write!(f, ":{col}")?;
                 }
             }

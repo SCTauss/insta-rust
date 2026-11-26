@@ -9,6 +9,9 @@ pub const PANIC_PORT: u16 = 0x3F9;
 /// x86 I/O port for host-to-guest input byte reads (`0` signals EOF).
 pub const INPUT_PORT: u16 = 0x3FA;
 
+/// Maximum bytes buffered per output/panic stream to bound host memory on runaway guests.
+const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+
 /// Accumulates host-captured output/panic streams and serves input bytes to a guest.
 #[derive(Debug, Default)]
 pub struct Channel {
@@ -37,7 +40,11 @@ impl Channel {
             _ => return,
         };
         let len = usize::from(size_bytes).min(size_of::<u32>());
-        target.extend_from_slice(&value.to_le_bytes()[..len]);
+        let room = MAX_CAPTURE_BYTES.saturating_sub(target.len());
+        let take = len.min(room);
+        if take > 0 {
+            target.extend_from_slice(&value.to_le_bytes()[..take]);
+        }
     }
 
     /// Serves a guest `in` exit from [`INPUT_PORT`] (returns `0` past EOF or on other ports).

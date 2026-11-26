@@ -112,7 +112,7 @@ unsafe impl Sync for CancelState {}
 
 impl CancelHandle for CancelState {
     fn cancel(&self) {
-        self.cancel_requested.store(true, Ordering::Release);
+        self.cancel_requested.store(true, Ordering::SeqCst);
         let alive = self.alive.lock().unwrap_or_else(PoisonError::into_inner);
         if *alive
             && self
@@ -120,8 +120,8 @@ impl CancelHandle for CancelState {
                 .compare_exchange(
                     STATE_RUNNING,
                     STATE_CANCELING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
                 )
                 .is_ok()
         {
@@ -267,7 +267,7 @@ impl Vcpu {
     }
 
     pub fn clear_cancel(&self) {
-        self.cancel.cancel_requested.store(false, Ordering::Release);
+        self.cancel.cancel_requested.store(false, Ordering::SeqCst);
     }
 
     pub fn complete_io_in(&mut self, size_bytes: u8, value: u32) -> Result<()> {
@@ -287,44 +287,57 @@ impl Vcpu {
 
     /// Blocks while the guest runs on the physical CPU, then decodes the exit.
     pub fn run(&mut self) -> Result<VmExit> {
-        if self.cancel.cancel_requested.load(Ordering::Acquire) {
-            return Ok(VmExit::Canceled);
-        }
-        self.cancel.state.store(STATE_RUNNING, Ordering::Release);
-        if self.cancel.cancel_requested.load(Ordering::Acquire) {
-            self.cancel.state.store(STATE_IDLE, Ordering::Release);
-            return Ok(VmExit::Canceled);
-        }
-
-        let mut exit = Aligned16(WHV_RUN_VP_EXIT_CONTEXT::default());
-        // SAFETY: `exit` is a writable, 16-byte-aligned `WHV_RUN_VP_EXIT_CONTEXT` of the size
-        // passed, and the partition outlives `self` per `new`'s contract.
-        let run_res = unsafe {
-            WHvRunVirtualProcessor(
-                self.partition,
-                self.index,
-                (&raw mut exit.0).cast(),
-                size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
-            )
-        };
-        self.cancel.state.swap(STATE_IDLE, Ordering::AcqRel);
-        run_res.map_err(failed("WHvRunVirtualProcessor"))?;
-
-        match exit.0.ExitReason {
-            reason if reason == WHvRunVpExitReasonX64Halt => Ok(VmExit::Halt),
-            reason if reason == WHvRunVpExitReasonX64IoPortAccess => self.decode_io(&exit.0),
-            reason if reason == WHvRunVpExitReasonException => self.decode_exception(&exit.0),
-            reason if reason == WHvRunVpExitReasonMemoryAccess => {
-                // SAFETY: the exit reason is `MemoryAccess`, so WHP filled `MemoryAccess`.
-                let mem = unsafe { exit.0.Anonymous.MemoryAccess };
-                Ok(VmExit::MemoryFault {
-                    gpa: mem.Gpa,
-                    gva: mem.Gva,
-                })
+        loop {
+            if self.cancel.cancel_requested.load(Ordering::SeqCst) {
+                return Ok(VmExit::Canceled);
             }
-            reason if reason == WHvRunVpExitReasonUnrecoverableException => Ok(VmExit::TripleFault),
-            reason if reason == WHvRunVpExitReasonCanceled => Ok(VmExit::Canceled),
-            reason => Ok(VmExit::Unhandled { code: reason.0 }),
+            self.cancel.state.store(STATE_RUNNING, Ordering::SeqCst);
+            if self.cancel.cancel_requested.load(Ordering::SeqCst) {
+                self.cancel.state.store(STATE_IDLE, Ordering::SeqCst);
+                return Ok(VmExit::Canceled);
+            }
+
+            let mut exit = Aligned16(WHV_RUN_VP_EXIT_CONTEXT::default());
+            // SAFETY: `exit` is a writable, 16-byte-aligned `WHV_RUN_VP_EXIT_CONTEXT` of the size
+            // passed, and the partition outlives `self` per `new`'s contract.
+            let run_res = unsafe {
+                WHvRunVirtualProcessor(
+                    self.partition,
+                    self.index,
+                    (&raw mut exit.0).cast(),
+                    size_of::<WHV_RUN_VP_EXIT_CONTEXT>() as u32,
+                )
+            };
+            self.cancel.state.swap(STATE_IDLE, Ordering::SeqCst);
+            run_res.map_err(failed("WHvRunVirtualProcessor"))?;
+
+            match exit.0.ExitReason {
+                reason if reason == WHvRunVpExitReasonX64Halt => return Ok(VmExit::Halt),
+                reason if reason == WHvRunVpExitReasonX64IoPortAccess => {
+                    return self.decode_io(&exit.0);
+                }
+                reason if reason == WHvRunVpExitReasonException => {
+                    return self.decode_exception(&exit.0);
+                }
+                reason if reason == WHvRunVpExitReasonMemoryAccess => {
+                    // SAFETY: the exit reason is `MemoryAccess`, so WHP filled `MemoryAccess`.
+                    let mem = unsafe { exit.0.Anonymous.MemoryAccess };
+                    return Ok(VmExit::MemoryFault {
+                        gpa: mem.Gpa,
+                        gva: mem.Gva,
+                    });
+                }
+                reason if reason == WHvRunVpExitReasonUnrecoverableException => {
+                    return Ok(VmExit::TripleFault);
+                }
+                reason if reason == WHvRunVpExitReasonCanceled => {
+                    if self.cancel.cancel_requested.load(Ordering::SeqCst) {
+                        return Ok(VmExit::Canceled);
+                    }
+                    // Stale cancel queued after a prior exit; drain and continue running.
+                }
+                reason => return Ok(VmExit::Unhandled { code: reason.0 }),
+            }
         }
     }
 
